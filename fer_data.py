@@ -99,11 +99,11 @@ if __name__ == '__main__':
         T.Normalize((0.5,), (0.5,)),
     ])
 
-    train_loader, val_loader, test_loader = create_fer_dataloaders('/home/yihe/CS229/dataset/fer2013.csv', 16, train_transforms, val_transforms)
+    train_loader, val_loader, test_loader = create_fer_dataloaders('../dataset/fer2013.csv', 16, train_transforms, val_transforms)
 
-    torch.save(train_loader, '/home/yihe/Diffusion/Diffusion-Models-pytorch/dataset/fer_train.pt')
-    torch.save(val_loader, '/home/yihe/Diffusion/Diffusion-Models-pytorch/dataset/fer_val.pt')
-    torch.save(test_loader, '/home/yihe/Diffusion/Diffusion-Models-pytorch/dataset/fer_test.pt')
+    torch.save(train_loader, '../dataset/fer_train.pt')
+    torch.save(val_loader, '../dataset/fer_val.pt')
+    torch.save(test_loader, '../dataset/fer_test.pt')
 
     for images, labels in train_loader:
         print(images.shape, labels.shape)
