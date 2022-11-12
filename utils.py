@@ -116,8 +116,8 @@ def get_data(args):
     return train_dataloader, val_dataset
 
 def get_fer_data(args):
-    train_dataloader = torch.load('/home/yihe/Diffusion/Diffusion-Models-pytorch/dataset/fer_train.pt')
-    val_dataset = torch.load('/home/yihe/Diffusion/Diffusion-Models-pytorch/dataset/fer_val.pt')
+    train_dataloader = torch.load('../dataset/fer_train.pt')
+    val_dataset = torch.load('../dataset/fer_val.pt')
 
     return train_dataloader, val_dataset
 
