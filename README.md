@@ -24,7 +24,7 @@ This is an easy-to-understand implementation of diffusion models within 100 line
 The following examples show how to sample images using the models trained in the video on the [fer-2013](https://www.kaggle.com/datasets/deadskull7/fer2013). You can download the checkpoints for the models [here]().
 
 ### Conditional Model
-This model was trained on [fer-2013 64x64](https://www.kaggle.com/datasets/joaopauloschuler/cifar10-64x64-resized-via-cai-super-resolution) with 7 classes ```airplane:0, auto:1, bird:2, cat:3, deer:4, dog:5, frog:6, horse:7, ship:8, truck:9```
+This model was trained on [fer-2013 48x48](https://www.kaggle.com/datasets/joaopauloschuler/cifar10-64x64-resized-via-cai-super-resolution) with 7 classes ```"Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"```
 ```python
     n = 6
     device = "cuda"
