@@ -13,6 +13,7 @@ import torchvision.transforms as T
 import torch.nn.functional as F
 import os
 from PIL import Image
+from deepface import DeepFace
 
 from IPython import embed
 
@@ -27,6 +28,7 @@ class fer_dataset(Dataset):
 
         self.raw_data = pd.read_csv(csv_path)
         self.pixels = self.raw_data['pixels'].to_list()
+
         # in FER13 each image in csv is a string of pixel values, we process here to get the images
         self.images_arr = np.array([self.pixel_to_image(pixel_str) for pixel_str in self.pixels]).reshape(-1, 48, 48)
         self.images = np.array([Image.fromarray(np.uint8(self.images_arr[i])) for i in range(len(self.images_arr))], dtype=object)
@@ -47,47 +49,39 @@ class fer_dataset(Dataset):
         return [int(i) for i in pixel_str.split(' ')]
 
     def __getitem__(self, index):
-        # print(self.images[index].shape)
-        # print(self.labels[index].shape)
         img = self.images[index]
         label = self.labels[index]
 
         if self.transforms:
             img = self.transforms(img)
 
-        # if self.one_hot:
-        #     label = F.one_hot(torch.tensor(label), num_classes=7)
-        return (img, label)
+        return (np.array(img), label)
 
     def __len__(self):
         print(self.labels.shape)
         return len(self.labels)
 
+
 def create_fer_dataloaders(csv_path, batch_size, train_transforms=None, val_transforms=None):
     print('-------Collecting Training Dataset--------')
     train_dataset = fer_dataset(csv_path, usage='Training', transforms=train_transforms, one_hot=True)
     print('-------Collecting Validation Dataset--------')
-    val_dataset = fer_dataset(csv_path, usage='PublicTest')
+    val_dataset = fer_dataset(csv_path, usage='PublicTest', transforms=val_transforms)
     print('-------Collecting Test Dataset--------')
-    test_dataset = fer_dataset(csv_path, usage='PrivateTest')
-    # print(len(train_dataset), len(val_dataset), len(test_dataset))
+    test_dataset = fer_dataset(csv_path, usage='PrivateTest', transforms=val_transforms)
 
     print('-------Generating Dataloader--------')
     train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=os.cpu_count() - 1)
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=os.cpu_count() - 1)
     test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=os.cpu_count() - 1)
 
-    # embed()
-
     return train_loader, val_loader, test_loader
-    # return test_loader
 
 
 if __name__ == '__main__':
-    # dataset = fer_dataset('/home/yihe/CS229/dataset/fer2013.csv')
-    # print(dataset[0][0].shape)
+
     train_transforms = torchvision.transforms.Compose([
-        T.Resize(48 + int(.1*48)),  # args.img_size + 1/10 *args.img_size
+        T.Resize(48 + int(.1*48)),  
         T.RandomResizedCrop(48, scale=(0.8, 1.0)),
         T.ToTensor(),
         T.Normalize((0.5,), (0.5,)),
@@ -99,13 +93,10 @@ if __name__ == '__main__':
         T.Normalize((0.5,), (0.5,)),
     ])
 
-    train_loader, val_loader, test_loader = create_fer_dataloaders('../dataset/fer2013.csv', 16, train_transforms, val_transforms)
+    train_loader, val_loader, test_loader = create_fer_dataloaders('./dataset/fer2013.csv', 32, train_transforms, val_transforms)
 
-    torch.save(train_loader, '../dataset/fer_train.pt')
-    torch.save(val_loader, '../dataset/fer_val.pt')
-    torch.save(test_loader, '../dataset/fer_test.pt')
+    torch.save(train_loader, './dataset/fer_train_32.pt')
+    torch.save(val_loader, './dataset/fer_val_32.pt')
+    torch.save(test_loader, './dataset/fer_test_32.pt')
 
-    for images, labels in train_loader:
-        print(images.shape, labels.shape)
-        break
 
