@@ -116,10 +116,11 @@ def get_data(args):
     return train_dataloader, val_dataset
 
 def get_fer_data(args):
-    train_dataloader = torch.load('../dataset/fer_train.pt')
-    val_dataset = torch.load('../dataset/fer_val.pt')
+    train_dataloader = torch.load('/home/ubuntu/CS230/dataset/fer_train_32.pt')
+    val_dataloader = torch.load('/home/ubuntu/CS230/dataset/fer_val_32.pt')
+    # test_dataloader = torch.load('/home/ubuntu/CS230/dataset/fer_test_32.pt')
 
-    return train_dataloader, val_dataset
+    return train_dataloader, val_dataloader
 
 
 def mk_folders(run_name):
