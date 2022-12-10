@@ -200,11 +200,31 @@ class UNet_conditional(UNet):
         if num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_dim)
 
-    def forward(self, x, t, y=None):
+    def forward(self, x, t, y=None, sem_embed=None):
         t = t.unsqueeze(-1)
         t = self.pos_encoding(t, self.time_dim)
 
-        if y is not None:
+        if sem_embed is not None:
+            t += sem_embed
+        elif y is not None:
             t += self.label_emb(y)
+
+        return self.unet_forwad(x, t)
+
+class UNet_semEmb(UNet):
+    def __init__(self, c_in=3, c_out=3, time_dim=256, num_classes=None, sem_dim=256):
+        super().__init__(c_in, c_out, time_dim)
+        self.label_emb = nn.Embedding(num_classes, time_dim//2)
+        self.sem_emb = nn.Linear(sem_dim, time_dim//2)
+
+    def forward(self, x, t, y=None, sem_encoding=None):
+        t = t.unsqueeze(-1)
+        t = self.pos_encoding(t, self.time_dim)
+
+        if sem_encoding is not None and y is not None:
+            label_emb = self.label_emb(y)
+            sem_emb = self.sem_emb(sem_encoding)
+            # print(t.size(),label_emb.size(), sem_emb.size(), sem_encoding.size())
+            t += torch.cat((label_emb, sem_emb), dim=1)
 
         return self.unet_forwad(x, t)
