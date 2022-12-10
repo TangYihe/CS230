@@ -9,9 +9,12 @@ from types import SimpleNamespace
 from fastprogress import progress_bar, master_bar
 from torch import optim
 from utils import *
-from modules import UNet_conditional, EMA
+from modules import UNet_conditional, EMA, UNet_semEmb
 import logging
 import wandb
+from IPython import embed # for sake of debugging
+from embedding_utils import prepare_cnn, cnn_embed, prepare_vae, vae_embed
+from torchvision import transforms
 
 config = SimpleNamespace(    
     run_name = "DDPM_conditional",
@@ -19,8 +22,8 @@ config = SimpleNamespace(
     noise_steps=1000,
     seed = 42,
     batch_size = 10,
-    img_size = 64,
-    num_classes = 10,
+    img_size = 48,
+    num_classes = 7,
     # dataset_path = get_cifar(img_size=64),
     dataset_path = None,
     train_folder = "train",
@@ -39,7 +42,7 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s", level=log
 
 
 class Diffusion:
-    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, img_size=256, num_classes=10, c_in=3, c_out=3, device="cuda"):
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, img_size=256, num_classes=10, c_in=3, c_out=3, use_sem=None, device="cuda"):
         self.noise_steps = noise_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
@@ -49,11 +52,28 @@ class Diffusion:
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
 
         self.img_size = img_size
-        self.model = UNet_conditional(c_in, c_out, num_classes=num_classes).to(device)
+
+        self.use_sem = use_sem
+        if self.use_sem == 'cnn':
+            sem_dim = 256
+        elif self.use_sem == 'vae':
+            sem_dim = 128
+
+        if self.use_sem is not None:
+            self.model = UNet_semEmb(c_in, c_out, num_classes=num_classes, sem_dim=sem_dim).to(device)
+        else:
+            self.model = UNet_conditional(c_in, c_out, num_classes=num_classes).to(device)
         self.ema_model = copy.deepcopy(self.model).eval().requires_grad_(False)
         self.device = device
         self.c_in = c_in
         self.num_classes = num_classes
+
+        # prepare semantic embedding models if applicable
+        self.emb_model = None
+        if use_sem == 'cnn':
+            self.emb_model = prepare_cnn()
+        elif use_sem == 'vae':
+            self.emb_model = prepare_vae()
 
     def prepare_noise_schedule(self):
         return torch.linspace(self.beta_start, self.beta_end, self.noise_steps)
@@ -69,19 +89,42 @@ class Diffusion:
         return sqrt_alpha_hat * x + sqrt_one_minus_alpha_hat * Ɛ, Ɛ
     
     @torch.inference_mode()
-    def sample(self, use_ema, labels, cfg_scale=3):
+    def sample(self, use_ema, labels, cfg_scale=3, seed=None, init_noise=None, ref_images=None):
         model = self.ema_model if use_ema else self.model
         n = len(labels)
+        if ref_images is not None:
+            ref_images = ref_images[:n]
+            print(ref_images.size())
         logging.info(f"Sampling {n} new images....")
         model.eval()
         with torch.inference_mode():
-            x = torch.randn((n, self.c_in, self.img_size, self.img_size)).to(self.device)
+            # include manual_seed to increase reproducibility 
+            if seed:
+                torch.manual_seed(seed)
+                
+            if init_noise is None:
+                x = torch.randn((n, self.c_in, self.img_size, self.img_size)).to(self.device)
+            else: # support selected noise
+                x = init_noise.to(self.device)
+
+            # check if has passed in reference images
+            sem_encoding = None
+            if ref_images is not None:
+                if self.use_sem == 'cnn':
+                    sem_encoding = torch.tensor(cnn_embed(self.emb_model, ref_images.expand(-1,3,-1,-1))).to(self.device)
+                elif self.use_sem == 'vae':
+                    sem_encoding = torch.tensor(vae_embed(self.emb_model, ref_images)).to(self.device)
+
             for i in progress_bar(reversed(range(1, self.noise_steps)), total=self.noise_steps-1, leave=False):
                 t = (torch.ones(n) * i).long().to(self.device)
-                predicted_noise = model(x, t, labels)
+                if self.use_sem is not None:
+                    predicted_noise = model(x, t, labels, sem_encoding=sem_encoding)
+                else:
+                    predicted_noise = model(x, t, labels)
                 if cfg_scale > 0:
                     uncond_predicted_noise = model(x, t, None)
                     predicted_noise = torch.lerp(uncond_predicted_noise, predicted_noise, cfg_scale)
+                    # predicted_noise = uncond_predicted_noise
                 alpha = self.alpha[t][:, None, None, None]
                 alpha_hat = self.alpha_hat[t][:, None, None, None]
                 beta = self.beta[t][:, None, None, None]
@@ -90,6 +133,7 @@ class Diffusion:
                 else:
                     noise = torch.zeros_like(x)
                 x = 1 / torch.sqrt(alpha) * (x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(beta) * noise
+
         x = (x.clamp(-1, 1) + 1) / 2
         x = (x * 255).type(torch.uint8)
         return x
@@ -107,15 +151,25 @@ class Diffusion:
         if train: self.model.train()
         else: self.model.eval()
         pbar = progress_bar(self.train_dataloader, leave=False)
+        
+        first_batch = None
         for i, (images, labels) in enumerate(pbar):
             with torch.autocast("cuda") and (torch.inference_mode() if not train else torch.enable_grad()):
                 images = images.to(self.device)
+                if first_batch is None:
+                    first_batch = images
+
+                sem_encoding = None
+                if self.use_sem == 'cnn':
+                    sem_encoding = torch.tensor(cnn_embed(self.emb_model, images.expand(-1,3,-1,-1))).to(self.device)
+                elif self.use_sem == 'vae':
+                    sem_encoding = torch.tensor(vae_embed(self.emb_model, images)).to(self.device)
                 labels = labels.to(self.device)
                 t = self.sample_timesteps(images.shape[0]).to(self.device)
                 x_t, noise = self.noise_images(images, t)
                 if np.random.random() < 0.1:
                     labels = None
-                predicted_noise = self.model(x_t, t, labels)
+                predicted_noise = self.model(x_t, t, labels, sem_encoding=sem_encoding)
                 loss = self.mse(noise, predicted_noise)
                 avg_loss += loss
             if train:
@@ -123,15 +177,17 @@ class Diffusion:
                 if use_wandb: 
                     wandb.log({"train_mse": loss.item(),
                                 "learning_rate": self.scheduler.get_last_lr()[0]})
-            pbar.comment = f"MSE={loss.item():2.3f}"        
-        return avg_loss.mean().item()
+            pbar.comment = f"MSE={loss.item():2.3f}"  
 
-    def log_images(self, use_wandb=False):
+        # returned the last batch of images for progress tracking      
+        return (avg_loss.mean().item(), first_batch)
+
+    def log_images(self, use_wandb=False, ref_images=None):
         "Log images to wandb and save them to disk"
         labels = torch.arange(self.num_classes).long().to(self.device)
-        sampled_images = self.sample(use_ema=False, labels=labels)
-        ema_sampled_images = self.sample(use_ema=True, labels=labels)
-        plot_images(sampled_images)  #to display on jupyter if available
+        sampled_images = self.sample(use_ema=False, labels=labels, ref_images=ref_images)
+        ema_sampled_images = self.sample(use_ema=True, labels=labels, ref_images=ref_images)
+        # plot_images(sampled_images)  #to display on jupyter if available
         if use_wandb:
             wandb.log({"sampled_images":     [wandb.Image(img.permute(1,2,0).squeeze().cpu().numpy()) for img in sampled_images]})
             wandb.log({"ema_sampled_images": [wandb.Image(img.permute(1,2,0).squeeze().cpu().numpy()) for img in ema_sampled_images]})
@@ -141,6 +197,8 @@ class Diffusion:
         self.ema_model.load_state_dict(torch.load(os.path.join(model_cpkt_path, ema_model_ckpt)))
 
     def save_model(self, run_name, use_wandb=False, epoch=-1):
+        if not os.path.exists(os.path.join("models", run_name)):
+            os.makedirs(os.path.join("models", run_name))
         "Save model locally and on wandb"
         torch.save(self.model.state_dict(), os.path.join("models", run_name, f"ckpt.pt"))
         torch.save(self.ema_model.state_dict(), os.path.join("models", run_name, f"ema_ckpt.pt"))
@@ -151,10 +209,12 @@ class Diffusion:
             wandb.log_artifact(at)
 
     def prepare(self, args):
-        mk_folders(args.run_name)
-        device = args.device
-        # self.train_dataloader, self.val_dataloader = get_data(args)
-        self.train_dataloader, self.val_dataloader = get_fer_data(args)
+        # mk_folders(args.run_name)
+        if args:
+            device = args.device
+        else:
+            device = "cuda"
+        self.train_dataloader, self.val_dataloader= get_fer_data(args)
         self.optimizer = optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=0.001)
         self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=args.lr, 
                                                  steps_per_epoch=len(self.train_dataloader), epochs=args.epochs)
@@ -165,17 +225,17 @@ class Diffusion:
     def fit(self, args):
         for epoch in progress_bar(range(args.epochs), total=args.epochs, leave=True):
             logging.info(f"Starting epoch {epoch}:")
-            _  = self.one_epoch(train=True, use_wandb=args.use_wandb)
+            _, train_images  = self.one_epoch(train=True, use_wandb=args.use_wandb)
             
             ## validation
             if args.do_validation:
-                avg_loss = self.one_epoch(train=False, use_wandb=args.use_wandb)
+                avg_loss, val_images = self.one_epoch(train=False, use_wandb=args.use_wandb)
                 if args.use_wandb:
                     wandb.log({"val_mse": avg_loss})
             
             # log predicitons
             if epoch % args.log_every_epoch == 0:
-                self.log_images(use_wandb=args.use_wandb)
+                self.log_images(use_wandb=args.use_wandb, ref_images=train_images)
                 self.save_model(run_name=args.run_name, use_wandb=args.use_wandb, epoch=epoch)
 
         # save model
@@ -198,6 +258,7 @@ def parse_args(config):
     parser.add_argument('--lr', type=float, default=config.lr, help='learning rate')
     parser.add_argument('--slice_size', type=int, default=config.slice_size, help='slice size')
     parser.add_argument('--noise_steps', type=int, default=config.noise_steps, help='noise steps')
+    parser.add_argument('--use_sem', type=str, default='vae', help='type of semantic encoding to use')
     args = vars(parser.parse_args())
     
     # update config with parsed args
@@ -211,7 +272,11 @@ if __name__ == '__main__':
     ## seed everything
     set_seed(config.seed)
 
-    diffuser = Diffusion(config.noise_steps, img_size=config.img_size, num_classes=config.num_classes, c_in=1, c_out=1)
+    
+    diffuser = Diffusion(config.noise_steps, img_size=config.img_size, num_classes=config.num_classes, c_in=1, c_out=1, use_sem=config.use_sem)
+    print('after initialize')
+
     with wandb.init(project="train_sd", group="train", config=config) if config.use_wandb else nullcontext():
         diffuser.prepare(config)
+        print('after prepare data')
         diffuser.fit(config)
